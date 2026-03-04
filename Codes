@@ -1,0 +1,344 @@
+import { useState, useRef, useEffect } from "react";
+
+const SYSTEM_PROMPT = `You are a professional Career Strategy Consultant AI.
+Your job is to identify suitable career paths for users based on their interests, favorite subjects, strengths, personality traits, values, work preferences, location constraints, and education level.
+
+You must operate in 4 structured phases.
+
+PHASE 1 – DISCOVERY (Ask Questions One at a Time)
+Ask ONLY ONE question at a time in this exact order:
+1. What subjects do you enjoy the most?
+2. What activities make you lose track of time?
+3. Do you prefer working with people, data, ideas, or physical tasks?
+4. Are you more introverted, extroverted, or balanced?
+5. Do you prefer stable income or high-risk/high-reward opportunities?
+6. What country are you located in?
+7. What is your current education level?
+8. Are you open to remote work?
+9. What skills do people often compliment you on?
+
+Start by welcoming the user briefly (2 sentences max), then ask Question 1.
+After each answer, acknowledge it in ONE short sentence, then ask the next question.
+Do NOT give career suggestions during Phase 1.
+After Question 9 is answered, say: "Thank you. I now have everything I need. Generating your full Career Strategy Report..."
+
+PHASE 2 – PROFILE ANALYSIS
+After collecting all 9 answers, output this section with the heading "## Phase 2 — Profile Analysis"
+1. Summarize the user's profile in 5–8 bullet points.
+2. A classification table with: Dominant Interest Cluster, Skill Category, Work Environment Preference, Risk Tolerance.
+
+PHASE 3 – CAREER MATCHING
+Output with heading "## Phase 3 — Career Matching"
+Provide Top 5 Career Matches. For each include:
+- Career Title (as ### heading)
+- Why it matches
+- Required core skills
+- Entry path
+- Estimated time to entry
+- Income range (entry-level and experienced)
+- Growth potential (Low/Medium/High)
+- Remote possibility (Yes/No/Partial)
+Be realistic based on the user's country. Be practical and specific.
+
+PHASE 4 – ACTION ROADMAP
+Output with heading "## Phase 4 — 90-Day Action Roadmap"
+Break into Month 1 (Exploration), Month 2 (Skill Building), Month 3 (Positioning).
+Include free learning resources, practical project ideas, networking suggestions, entry-level job titles.
+
+End with a bold closing insight about the user's unique profile combination.
+
+FORMAT RULES:
+- Use markdown headings and bullet points
+- No emojis
+- Be strategic, not motivational
+- Keep tone professional and analytical
+- If user says they don't know what they like, provide a mini diagnostic exercise
+- If user is under 18, include education-focused guidance
+- If user wants entrepreneurship, include business model suggestions
+- If user has no degree, always include no-degree career paths`;
+
+const parseMarkdown = (text) => {
+  if (!text) return "";
+  return text
+    .replace(/^#### (.+)$/gm, '<h4 class="text-sm font-bold text-blue-900 mt-3 mb-1">$1</h4>')
+    .replace(/^### (.+)$/gm, '<h3 class="text-base font-bold text-blue-800 mt-5 mb-2 border-l-4 border-blue-700 pl-3">$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2 class="text-lg font-bold text-white bg-blue-900 px-4 py-2 mt-6 mb-3">$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1 class="text-xl font-bold text-blue-900 mt-4 mb-2">$1</h1>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong class="font-semibold text-blue-900">$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/^- (.+)$/gm, '<li class="ml-4 mb-1 list-disc">$1</li>')
+    .replace(/(<li.*<\/li>\n?)+/g, (m) => `<ul class="my-2 space-y-1">${m}</ul>`)
+    .replace(/^\d+\. (.+)$/gm, '<li class="ml-4 mb-1 list-decimal">$1</li>')
+    .replace(/\n\n/g, '</p><p class="mb-2">')
+    .replace(/\n/g, '<br/>');
+};
+
+const TypingIndicator = () => (
+  <div className="flex items-center gap-1 px-4 py-3">
+    <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+    <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+    <div className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+  </div>
+);
+
+const PhaseIndicator = ({ phase }) => {
+  const phases = [
+    { num: 1, label: "Discovery" },
+    { num: 2, label: "Analysis" },
+    { num: 3, label: "Matching" },
+    { num: 4, label: "Roadmap" },
+  ];
+  return (
+    <div className="flex items-center gap-1">
+      {phases.map((p, i) => (
+        <div key={p.num} className="flex items-center gap-1">
+          <div className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-bold transition-all ${
+            phase >= p.num ? "bg-blue-700 text-white" : "bg-gray-200 text-gray-400"
+          }`}>
+            <span>{p.num}</span>
+            <span className="hidden sm:inline">{p.label}</span>
+          </div>
+          {i < phases.length - 1 && (
+            <div className={`w-4 h-0.5 ${phase > p.num ? "bg-blue-700" : "bg-gray-300"}`} />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+export default function CareerConsultant() {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [phase, setPhase] = useState(1);
+  const [started, setStarted] = useState(false);
+  const [questionCount, setQuestionCount] = useState(0);
+  const bottomRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  const detectPhase = (text) => {
+    if (text.includes("Phase 4") || text.includes("90-Day")) return 4;
+    if (text.includes("Phase 3") || text.includes("Career Matching")) return 3;
+    if (text.includes("Phase 2") || text.includes("Profile Analysis")) return 2;
+    return phase;
+  };
+
+  const startSession = async () => {
+    setStarted(true);
+    setLoading(true);
+    try {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          system: SYSTEM_PROMPT,
+          messages: [{ role: "user", content: "Hello, I'd like to get career guidance." }],
+        }),
+      });
+      const data = await response.json();
+      const reply = data.content?.map((b) => b.text || "").join("") || "Let's get started.";
+      setMessages([{ role: "assistant", content: reply }]);
+    } catch (e) {
+      setMessages([{ role: "assistant", content: "Connection error. Please try again." }]);
+    }
+    setLoading(false);
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim() || loading) return;
+    const userMsg = input.trim();
+    setInput("");
+    const newMessages = [...messages, { role: "user", content: userMsg }];
+    setMessages(newMessages);
+    setLoading(true);
+    setQuestionCount((q) => q + 1);
+
+    try {
+      const apiMessages = newMessages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      }));
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 4000,
+          system: SYSTEM_PROMPT,
+          messages: apiMessages,
+        }),
+      });
+      const data = await response.json();
+      const reply = data.content?.map((b) => b.text || "").join("") || "Please try again.";
+      const updatedMessages = [...newMessages, { role: "assistant", content: reply }];
+      setMessages(updatedMessages);
+      setPhase(detectPhase(reply));
+    } catch (e) {
+      setMessages([...newMessages, { role: "assistant", content: "Connection error. Please try again." }]);
+    }
+    setLoading(false);
+    setTimeout(() => inputRef.current?.focus(), 100);
+  };
+
+  const handleKey = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const reset = () => {
+    setMessages([]);
+    setInput("");
+    setPhase(1);
+    setStarted(false);
+    setQuestionCount(0);
+  };
+
+  if (!started) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+        <div className="max-w-lg w-full">
+          <div className="bg-blue-900 text-white p-8 rounded-t-lg">
+            <div className="text-xs font-bold tracking-widest text-blue-300 uppercase mb-2">AI-Powered</div>
+            <h1 className="text-3xl font-bold mb-2">Career Strategy Consultant</h1>
+            <p className="text-blue-200 text-sm">Personalized career analysis, matching, and 90-day action roadmap</p>
+          </div>
+          <div className="bg-white border border-gray-200 p-6 rounded-b-lg shadow-lg">
+            <div className="space-y-3 mb-6">
+              {[
+                { num: "01", title: "Discovery", desc: "9 targeted questions about your profile" },
+                { num: "02", title: "Profile Analysis", desc: "Skill cluster and environment classification" },
+                { num: "03", title: "Career Matching", desc: "Top 5 careers with income and growth data" },
+                { num: "04", title: "Action Roadmap", desc: "Structured 90-day plan with resources" },
+              ].map((p) => (
+                <div key={p.num} className="flex items-start gap-3 p-3 bg-gray-50 rounded">
+                  <span className="text-blue-700 font-bold text-sm w-6 shrink-0">{p.num}</span>
+                  <div>
+                    <div className="font-semibold text-sm text-gray-800">{p.title}</div>
+                    <div className="text-xs text-gray-500">{p.desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={startSession}
+              className="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-3 px-6 rounded transition-colors text-sm tracking-wide uppercase"
+            >
+              Begin Career Assessment
+            </button>
+            <p className="text-center text-xs text-gray-400 mt-3">Takes approximately 10–15 minutes</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex flex-col">
+      {/* Header */}
+      <div className="bg-blue-900 text-white px-4 py-3 flex items-center justify-between shadow-md shrink-0">
+        <div className="flex items-center gap-3">
+          <div>
+            <div className="font-bold text-sm">Career Strategy Consultant</div>
+            <div className="text-blue-300 text-xs">AI-Powered Assessment</div>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <PhaseIndicator phase={phase} />
+          <button
+            onClick={reset}
+            className="text-blue-300 hover:text-white text-xs border border-blue-700 hover:border-blue-400 px-2 py-1 rounded transition-colors"
+          >
+            Restart
+          </button>
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 max-w-3xl w-full mx-auto">
+        {messages.map((msg, i) => (
+          <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+            {msg.role === "assistant" && (
+              <div className="w-7 h-7 rounded bg-blue-900 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-1 mr-2">C</div>
+            )}
+            <div
+              className={`max-w-2xl rounded-lg px-4 py-3 text-sm leading-relaxed ${
+                msg.role === "user"
+                  ? "bg-blue-700 text-white rounded-tr-sm"
+                  : "bg-white border border-gray-200 text-gray-800 rounded-tl-sm shadow-sm"
+              }`}
+            >
+              {msg.role === "assistant" ? (
+                <div
+                  className="prose prose-sm max-w-none"
+                  dangerouslySetInnerHTML={{ __html: parseMarkdown(msg.content) }}
+                />
+              ) : (
+                msg.content
+              )}
+            </div>
+          </div>
+        ))}
+
+        {loading && (
+          <div className="flex justify-start">
+            <div className="w-7 h-7 rounded bg-blue-900 text-white text-xs font-bold flex items-center justify-center shrink-0 mt-1 mr-2">C</div>
+            <div className="bg-white border border-gray-200 rounded-lg rounded-tl-sm shadow-sm">
+              <TypingIndicator />
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Progress bar for discovery phase */}
+      {phase === 1 && questionCount > 0 && (
+        <div className="max-w-3xl w-full mx-auto px-4">
+          <div className="flex justify-between text-xs text-gray-400 mb-1">
+            <span>Discovery Progress</span>
+            <span>{Math.min(questionCount, 9)} / 9 questions</span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-1 mb-2">
+            <div
+              className="bg-blue-700 h-1 rounded-full transition-all duration-500"
+              style={{ width: `${Math.min((questionCount / 9) * 100, 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Input */}
+      <div className="bg-white border-t border-gray-200 px-4 py-3 shrink-0">
+        <div className="max-w-3xl mx-auto flex gap-2">
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKey}
+            placeholder="Type your answer and press Enter..."
+            rows={1}
+            disabled={loading}
+            className="flex-1 border border-gray-300 rounded-lg px-4 py-2 text-sm resize-none focus:outline-none focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-400"
+            style={{ minHeight: "42px", maxHeight: "120px" }}
+          />
+          <button
+            onClick={sendMessage}
+            disabled={loading || !input.trim()}
+            className="bg-blue-900 hover:bg-blue-800 disabled:bg-gray-300 text-white px-5 py-2 rounded-lg text-sm font-semibold transition-colors shrink-0"
+          >
+            Send
+          </button>
+        </div>
+        <div className="text-center text-xs text-gray-400 mt-1">Press Enter to send</div>
+      </div>
+    </div>
+  );
+}
